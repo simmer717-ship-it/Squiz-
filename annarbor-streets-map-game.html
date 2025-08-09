@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Ann Arbor Streets Map Guessing Game</title>
+<link
+  rel="stylesheet"
+  href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+/>
+<style>
+  body, html {
+    margin: 0; padding: 0; height: 100%;
+    font-family: Arial, sans-serif;
+  }
+  #map { height: 70%; }
+  #controls {
+    padding: 10px;
+    background: #f0f8ff;
+  }
+  input[type="text"] {
+    font-size: 16px;
+    padding: 5px;
+    width: 300px;
+  }
+  button {
+    font-size: 16px;
+    margin-left: 8px;
+    padding: 6px 12px;
+    cursor: pointer;
+  }
+  #message { margin-top: 10px; color: green; }
+  #error { margin-top: 10px; color: red; }
+  #score { font-weight: bold; }
+</style>
+</head>
+<body>
+
+<div id="controls">
+  <h2>Ann Arbor Streets Map Guessing Game</h2>
+  <p>Guess streets in Ann Arbor by name; correct ones turn green on the map.</p>
+  <input type="text" id="street-input" placeholder="Enter street name" autocomplete="off" />
+  <button id="guess-btn">Guess</button>
+  <button id="hint-btn">Get Hint</button>
+  <button id="finish-btn">Finish</button>
+  <div id="message"></div>
+  <div id="error"></div>
+  <p>Correct guesses: <span id="score">0</span> / <span id="total">...</span></p>
+</div>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+// Initialize map
+const map = L.map('map').setView([42.2808, -83.7430], 13);
+
+// Add OSM tiles
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '© OpenStreetMap contributors'
+}).addTo(map);
+
+const messageEl = document.getElementById('message');
+const errorEl = document.getElementById('error');
+const scoreEl = document.getElementById('score');
+const totalEl = document.getElementById('total');
+const inputEl = document.getElementById('street-input');
+const guessBtn = document.getElementById('guess-btn');
+const hintBtn = document.getElementById('hint-btn');
+const finishBtn = document.getElementById('finish-btn');
+
+let guessed = new Set();
+let streetsLayerGroup = L.layerGroup().addTo(map);
+let streetNameToLayer = {}; // name => layer(s)
+
+messageEl.textContent = 'Loading streets data, please wait...';
+errorEl.textContent = '';
+
+function normalize(str) {
+  return str.trim().toLowerCase();
+}
+
+// Overpass API query to get streets inside Ann Arbor city boundary
+const overpassQuery = `
+[out:json][timeout:25];
+area["name"="Ann Arbor"]["boundary"="administrative"]["admin_level"="8"];
+(
+  way["highway"]["name"](area);
+);
+out geom;
+`;
+
+// Fetch streets from Overpass API
+fetch('https://overpass-api.de/api/interpreter', {
+  method: 'POST',
+  body: overpassQuery
+})
+  .then(response => response.json())
+  .then(data => {
+    const elements = data.elements;
+    if (!elements || elements.length === 0) {
+      errorEl.textContent = 'No streets data found from Overpass API.';
+      messageEl.textContent = '';
+      return;
+    }
+
+    // Process streets - group by name
+    let streetsByName = {};
+    elements.forEach(elem => {
+      if (!elem.tags || !elem.tags.name) return;
+      const name = elem.tags.name.trim();
+      if (!streetsByName[name]) {
+        streetsByName[name] = [];
+      }
+      streetsByName[name].push(elem);
+    });
+
+    const streetNames = Object.keys(streetsByName).sort((a,b) => a.localeCompare(b));
+    totalEl.textContent = streetNames.length;
+
+    // For each street name, draw all its ways in grey and store references
+    streetNames.forEach(name => {
+      const ways = streetsByName[name];
+      const layers = [];
+      ways.forEach(way => {
+        if (!way.geometry) return;
+        const latlngs = way.geometry.map(g => [g.lat, g.lon]);
+        const polyline = L.polyline(latlngs, {color: 'grey', weight: 3, opacity: 0.7}).addTo(streetsLayerGroup);
+        layers.push(polyline);
+      });
+      streetNameToLayer[normalize(name)] = layers;
+    });
+
+    messageEl.textContent = 'Streets data loaded. Start guessing!';
+  })
+  .catch(err => {
+    errorEl.textContent = 'Failed to load streets data: ' + err;
+    messageEl.textContent = '';
+  });
+
+// Guessing logic
+guessBtn.onclick = () => {
+  messageEl.textContent = '';
+  errorEl.textContent = '';
+  const guessRaw = inputEl.value;
+  const guess = normalize(guessRaw);
+  inputEl.value = '';
+  inputEl.focus();
+
+  if (!guess) {
+    errorEl.textContent = 'Please enter a street name.';
+    return;
+  }
+  if (guessed.has(guess)) {
+    errorEl.textContent = `"${guessRaw}" already guessed.`;
+    return;
+  }
+  if (!(guess in streetNameToLayer)) {
+    errorEl.textContent = `"${guessRaw}" is not found in Ann Arbor streets (check spelling).`;
+    return;
+  }
+
+  // Mark street as guessed and color lines green
+  guessed.add(guess);
+  streetNameToLayer[guess].forEach(line => {
+    line.setStyle({color: 'green', weight: 5, opacity: 1});
+  });
+  scoreEl.textContent = guessed.size;
+  messageEl.textContent = `Good job! "${guessRaw}" is correct.`;
+};
+
+// Hint button - pick a random unguessed street and show first letters
+hintBtn.onclick = () => {
+  messageEl.textContent = '';
+  errorEl.textContent = '';
+  const allStreets = Object.keys(streetNameToLayer);
+  const unguessed = allStreets.filter(s => !guessed.has(s));
+  if (unguessed.length === 0) {
+    messageEl.textContent = "You've guessed all streets!";
+    return;
+  }
+  const hintStreet = unguessed[Math.floor(Math.random()*unguessed.length)];
+  const hint = `Hint: A street starting with "${hintStreet.slice(0,3)}" and length ${hintStreet.length} letters.`;
+  messageEl.textContent = hint;
+};
+
+// Finish button disables input and shows summary
+finishBtn.onclick = () => {
+  inputEl.disabled = true;
+  guessBtn.disabled = true;
+  hintBtn.disabled = true;
+  finishBtn.disabled = true;
+  messageEl.textContent = `Game over! You guessed ${guessed.size} out of ${totalEl.textContent} streets.`;
+};
+
+// Press Enter to guess
+inputEl.addEventListener('keyup', e => {
+  if (e.key === 'Enter') guessBtn.click();
+});
+</script>
+
+</body>
+</html>
